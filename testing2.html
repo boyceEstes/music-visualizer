@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+        <script src=build/three.js></script>
+		<script src="https://threejs.org/examples/js/controls/OrbitControls.js"></script>
+    </head>
+    <body>
+        <div id="overlay">
+            <div>
+                <button id="startButton">Click to Play</button>
+                <p>Audio playback requires user interaction.</p>
+            </div>
+        </div>
+		<div id="container"></div>
+
+        <!-- NEW  -->
+
+		<!-- Shaders -->
+		<script type="x-shader/x-vertex" id="vertexShader">
+
+			precision highp float;
+			attribute vec3 position;
+			attribute vec2 uv;
+			attribute vec3 normal; // new
+
+			uniform mat4 projectionMatrix;
+			uniform mat4 modelViewMatrix;	// this is modelMatrix (model) * viewMatrix (camera)
+			uniform mat3 normalMatrix; // the inverse of the modelViewMatrix.
+			uniform sampler2D tAudioData;
+
+			varying vec2 vUV;
+			varying vec3 vNormal;	// new
+
+			void main() {
+				vUV = uv;
+				vNormal = normalize(normalMatrix * normal);
+
+				vec3 p = position;
+				float f = texture2D(tAudioData, vec2(p.x, 0.0)).r;		// get amplitude at this position
+				float displacement = 5.0;
+				float i = step(vUV.y, f);
+				// p.x += i;
+				// p.y += i * displacement;
+
+				gl_Position = projectionMatrix *
+							  modelViewMatrix *
+							  vec4(p,1.0);
+
+			}
+
+			// gl_Position = vec4( position, 1.0 );	// for the 2d interpretation on the plane
+		</script>
+
+
+
+		<script id="fragmentShader" type="x-shader/x-fragment">
+			precision highp float;
+
+			varying vec2 vUV;
+			varying vec3 vNormal;	// new
+
+			uniform sampler2D brick;
+			uniform sampler2D tAudioData;
+
+			void main() {
+				// vec3 a_normal = normalize(v_normal);
+				vec3 brickColor = texture2D(brick,vUV).rgb ;
+				// vec3 brickColor = texture2D(brick, normalize(vNormal)).rgb;
+
+				/*
+				* Explaination:
+				* The tAudioData is passed in as an single array of values.
+				* This means we cannot get it's x and y position, so we create a vec2 that is the x position with a 0 for y
+				* Usually the value that is returned from a texture is a rgb vector, but each element only holds a single value
+				* To only get this value we will call '.r' on the returned value instead of the usually '.rgb'.
+				*
+				* The step function returns 0.0 if y < x, otherwise it returns 0.0.
+
+				*/
+
+
+
+				float f = texture2D( tAudioData, vec2( vUV.x, 0.0 ) ).r;		// gets uniform (array) and position on x
+				float i = step(vUV.y, f);// * step(f-0.125, vUV.y);				// this fills in values for the y positions
+
+				vec3 normalBrickColor = vNormal * brickColor;
+				gl_FragColor = vec4(mix(brickColor,normalBrickColor,i), 1.0);
+
+			}
+
+			// uniform sampler2D tAudioData;
+			// varying vec2 vUv;
+			//
+			// void main() {
+			// 	vec3 backgroundColor = vec3( 0.125, 0.125, 0.125 );				// gray
+			// 	vec3 color = vec3( 0.0, 1.0, 1.0 );								// blue-green maxed out
+			// 	float f = texture2D( tAudioData, vec2( vUv.x, 0.0 ) ).r;		// gets uniform (array) and position on x
+			// 	float i = step(vUv.y, f);										// returns 0.0 if y is < x, otherwise 1.0
+			// 	//float i = step( vUv.y, f ) * step( f - 0.0125, vUv.y );
+			// 	gl_FragColor = vec4( mix( backgroundColor, color, i ), 1.0 );	// returns x(1-z) + y(z), so x, if z = 0, y
+			// }
+
+		</script>
+
+        <!-- END NEW -->
+
+        <script type="module">
+            var camera, scene, renderer, light;									// basic rendering
+			var analyser, frequencyData											// audio
+			var uniforms;											// shader
+			var cameraControls													// movement
+
+            let WIDTH, HEIGHT;
+
+            var startButton = document.getElementById('startButton');			// begin screen
+            startButton.addEventListener('click',init);
+
+            function init() {
+                // set width and height
+                WIDTH = window.innerWidth;
+                HEIGHT = window.innerHeight;
+
+				// remove overlay that presented the button
+                var overlay = document.getElementById( 'overlay' );
+                overlay.remove();
+
+				// initialize scene and renderer
+				initRenderer();													// placed first because camera needed renderer
+                initScene();
+
+				// handle resizing
+                onWindowResize();
+                window.addEventListener( 'resize', onWindowResize, false);
+
+                animate();             											// get requestAnimationFrame and render
+            }
+
+            function initScene() {
+                // create scene
+                scene = new THREE.Scene();
+
+                // create camera
+				initCamera();
+
+                // create light
+                // light = new THREE.DirectionalLight(0xffffff);
+                // light.position.set(0, 1, 1).normalize();      					// x y z (y is the up axis)
+                // scene.add(light);
+				light = new THREE.PointLight(0xff0000,1,100);
+				light.position.set(3,3,3);
+				scene.add(light);
+
+                // add audio listener
+                var fftSize = 128;	// this is double what actual gets captured in frequency count
+                var listener = new THREE.AudioListener();
+                var audio = new THREE.Audio( listener );
+                var mediaElement = new Audio( './sounds/black-friday.mp3' );
+                mediaElement.loop = true;
+                mediaElement.play();
+                audio.setMediaElementSource( mediaElement );
+                analyser = new THREE.AudioAnalyser(audio, fftSize);
+				frequencyData = new Uint8Array(analyser.frequencyBinCount);
+				frequencyData = analyser.data;
+				fftSize = analyser.data.length;
+				console.log("frquencyData: "+analyser.data);
+				console.log("frequencyData/2: "+analyser.data.slice(0,analyser.data.length/2));
+
+                // create sphere
+				var radius = 3, segments = 20, rings = 20;
+                var geometry = new THREE.SphereBufferGeometry(radius, segments, rings);
+                // Make material based on custom shader. Audio data is passed in through uniforms.
+                // var material = new THREE.MeshPhongMaterial( { color: 0xffaa00, flatShading: true, shininess: 0 } );
+                uniforms = {
+                    tAudioData: {
+                        value: new THREE.DataTexture(frequencyData, fftSize, 1, THREE.LuminanceFormat)
+                    },
+					brick: {
+						type: "t", // a Sampler2D
+						value: new THREE.TextureLoader().load ("brick.jpg",function(texture){animate();})
+					}
+                };
+                var material = new THREE.RawShaderMaterial({
+                    uniforms: uniforms,
+                    vertexShader: document.getElementById('vertexShader').textContent,
+                    fragmentShader: document.getElementById('fragmentShader').textContent
+                });
+                var mesh = new THREE.Mesh(geometry, material);
+                mesh.position.set(0,0,0);
+                scene.add(mesh);
+
+				// create cube
+				var width = 3, height = 3, depth = 3;
+				var geometry = new THREE.BoxBufferGeometry(width, height, depth);
+				// Make material based on custom shader. Audio data is passed in through uniforms.
+				var material = new THREE.RawShaderMaterial({
+					uniforms: uniforms,
+					vertexShader: document.getElementById('vertexShader').textContent,
+					fragmentShader: document.getElementById('fragmentShader').textContent
+				});
+				var meshC = new THREE.Mesh(geometry, material);
+				mesh.position.set(8,0,0);
+				scene.add(meshC);
+            }
+
+			function initCamera() {
+				var fov = 50, aspect = WIDTH/HEIGHT, near = 1, far = 20;
+
+				// basic
+				// camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+				// camera.position.set(15, 0, 0);
+				// camera.lookAt(0,0,0);
+
+				// movement
+				camera = new THREE.PerspectiveCamera(fov, aspect, near, far);
+				camera.position.set(0, 3.5, 10);
+				camera.lookAt(scene.position);
+				cameraControls = new THREE.OrbitControls (
+					camera, renderer.domElement
+				);
+				cameraControls.addEventListener("change",
+					function(){
+						camera.updateProjectionMatrix();
+						render();
+					}
+				);
+			}
+
+            function initRenderer() {
+                var container = document.getElementById('container');
+                renderer = new THREE.WebGLRenderer({antialias: true});
+                renderer.setSize(WIDTH, HEIGHT);
+                renderer.setClearColor(0x888888, 1);
+                container.appendChild(renderer.domElement);
+            }
+
+
+            function render(){
+                // update frequency data every render
+                analyser.getFrequencyData();
+				frequencyData = analyser.data;
+                uniforms.tAudioData.value.needsUpdate = true;
+				console.log(frequencyData);
+				// console.log(analyser.data);
+
+                // render scene
+                renderer.render(scene, camera);
+            }
+
+            // NEW
+            function animate() {
+                requestAnimationFrame(animate);
+                render();
+            }
+
+            function onWindowResize() {
+				WIDTH = window.innerWidth;
+				HEIGHT = window.innerHeight;
+                camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				renderer.setSize( window.innerWidth, window.innerHeight );
+            }
+
+
+
+        </script>
+    </body>
+</html>
